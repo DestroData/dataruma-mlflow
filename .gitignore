@@ -1,0 +1,60 @@
+# Ignore le dossier mlruns
+mlruns/
+
+# Python bytecode files
+__pycache__/
+*.py[cod]
+
+# Distribution / packaging
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+*.egg-info/
+*.egg
+
+# Jupyter Notebook files
+*.ipynb_checkpoints
+
+# IDE and editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.bak
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+*.DS_Store
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+
+# pytest cache
+.pytest_cache/
+
+# C extensions
+*.so
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Other
+*.csv
+*.sqlite3
+*.db
+
+# Ignore the specific config file
+config.json
+

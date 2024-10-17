@@ -1,88 +1,143 @@
-import logging
-from steps.ingest import ingest
-from steps.training import training
-from steps.predict import predict
-from steps.others_functions import separate_target
+import pandas as pd
+import optuna
 import mlflow
-import mlflow.sklearn
-from mlflow.models import infer_signature
+from sklearn.metrics import root_mean_squared_error
 from sklearn.ensemble import GradientBoostingRegressor
+from mlflow.models import infer_signature
 
-logging.basicConfig(level=logging.INFO,format='%(asctime)s:%(levelname)s:%(message)s')
+from figures import (plot_correlations,
+                    plot_feature_importance,
+                    plot_residuals,
+                    plot_residuals_hist)
 
-def train_with_mlflow(data_version, model, params, tags, exp_name):
-
-    # Load data
-    trainset, testset = ingest(data_version)
-    logging.info("Data ingestion completed successfully")
-
-    # Prepare and train model
-    x_train, y_train = separate_target(trainset)
-    train_model = training(x_train, y_train, model, params)
-    logging.info("Model training completed successfully")
-
-    # Evaluate model
-    x_test, y_test = separate_target(testset)
-    metrics = predict(x_test, y_test, train_model)
-    logging.info("Model evaluation completed successfully")
+from utils import (separate_target,
+                            get_or_create_experiment,
+                            cal_all_metrics, ingest)
 
 
+# to control logs
+optuna.logging.set_verbosity(optuna.logging.ERROR)
 
-    client = mlflow.MlflowClient()
-    mlflow.set_tracking_uri("http://127.0.0.1:8080")
 
-    experiment = client.get_experiment_by_name(exp_name)
+def champion_callback(study, frozen_trial):
+    """
+    Logging callback that will report when a new trial iteration improves upon existing
+    best trial values. Not for every run.
+    """
 
-    if experiment is None:
-        experiment_id = client.create_experiment(name=exp_name, tags=tags)
+    winner = study.user_attrs.get("winner", None)
 
-    else:
-        experiment_id = experiment.experiment_id
+    if study.best_value and winner != study.best_value:
+        study.set_user_attr("winner", study.best_value)
+        if winner:
+            improvement_percent = (abs(winner - study.best_value) / study.best_value) * 100
+            print(
+                f"Trial {frozen_trial.number} achieved value: {frozen_trial.value} with "
+                f"{improvement_percent: .4f}% improvement"
+            )
+        else:
+            print(f"Initial trial {frozen_trial.number} achieved value: {frozen_trial.value}")
 
-    with mlflow.start_run(experiment_id=experiment_id):
+
+def objective(trial):
+
+    params = {
+        "n_estimators": trial.suggest_int("n_estimators", 50, 500),
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3),
+        "max_depth": trial.suggest_int("max_depth", 3, 15),
+        "min_samples_split": trial.suggest_int("min_samples_split", 2, 20),
+        "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 10),
+    }
+
+    model = GradientBoostingRegressor(**params)
+    model.fit(train_X, train_y)
+
+    pred_y = model.predict(test_X)
+    metrics = cal_all_metrics(test_y, pred_y)
+    rmse = root_mean_squared_error(test_y, pred_y)
+
+    with mlflow.start_run(experiment_id=experiment_id, run_name=child_run_name, nested=True):
 
         mlflow.log_params(params)
+        mlflow.set_tags(tags)
         mlflow.log_metrics(metrics)
 
-        signature = infer_signature(x_train, train_model.predict(x_train))
 
+        return rmse
+
+def start_optimization(run_name, n_trials):
+
+    mlflow.set_tracking_uri("http://127.0.0.1:8080")
+
+    study = optuna.create_study(direction="minimize")
+
+    with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, nested=True):
+
+        study.optimize(objective , n_trials=n_trials, callbacks=[champion_callback])
+
+        # create usefull variables of the best model
+        best_params = study.best_params
+        best_model = GradientBoostingRegressor(**best_params, random_state=42)
+        best_model.fit(train_X, train_y)
+        pred_y = best_model.predict(test_X)
+        metrics = cal_all_metrics(test_y, pred_y)
+        signature = infer_signature(test_X, pred_y)
+
+        # creat graph for analysis
+        corelation_plot = plot_correlations(data, "nombre_pizza_soir")
+        importances = plot_feature_importance(best_model, train_X)
+        residuals = plot_residuals(pred_y, test_y)
+        residuals = plot_residuals_hist(pred_y, test_y)
+
+        #logs graph in mlflow
+        mlflow.log_figure(figure=corelation_plot, artifact_file="plots/correlation_plot.png")
+        mlflow.log_figure(figure=importances, artifact_file="plots/feature_importances.png")
+        mlflow.log_figure(figure=residuals, artifact_file="plots/residuals.png")
+        mlflow.log_figure(figure=residuals, artifact_file="plots/residuals_histogramme.png")
+
+        # logs tags, params and metrics in mlflow
+        mlflow.log_params(study.best_params)
+        mlflow.set_tags(tags=tags)
+        mlflow.log_metrics(metrics)
+
+        #log models in mlflow
         mlflow.sklearn.log_model(
-        sk_model=train_model,
+        sk_model=best_model,
         artifact_path="",
         signature=signature,
-        input_example=x_train,
-        registered_model_name="registered_model_name",
+        input_example=train_X,
+        registered_model_name="XGB_from_sk",
         )
 
-        logging.info("MLflow tracking completed successfully")
-
-    print(f"Tags: {experiment.tags}")
 
 if __name__ == "__main__":
 
+#################################### parameters #########################################
+
     experiment_description= (
-        "expérimentation de test"
+        "the goal of the experience is to optimze "
+        "the hyperparameters of the Gradient Boosting Regressors"""
     )
 
     tags= {
-    "project_name": "grocery-forecasting",
-    "store_dept": "produce",
-    "team": "stores-ml",
-    "project_quarter": "Q3-2023",
+    "project": "dataruma",
+    "optimizer_engine": "optuna",
+    "model_family": "xgboost",
     "mlflow.note.content": experiment_description,
     }
 
-    params = {'n_estimators':450,
-    'learning_rate':0.1,
-    'max_depth':3,
-    'subsample':1.0,
-    'min_samples_split':2,
-    'min_samples_leaf':1,
-    'max_features':None,
-    'random_state':42
-    }
+    data_version = 'v1'
+    exp_name = 'dataruma'
+    main_run_name = "main_run"
+    child_run_name = "child_run"
+    n_trials = 10
 
-    exp_name = f'Dataruma'
+##########################################################################################
 
-    train_with_mlflow('v1', GradientBoostingRegressor, params, tags, exp_name)
+    experiment_id = get_or_create_experiment(exp_name, tags)
+    trainset, testset = ingest(data_version)
+    data = pd.concat([trainset, testset], ignore_index=True)
+    train_X, train_y, = separate_target(trainset)
+    test_X, test_y = separate_target(testset)
 
+    start_optimization(main_run_name, n_trials)
