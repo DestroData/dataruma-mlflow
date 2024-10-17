@@ -16,7 +16,8 @@ venv.bak/
 *.egg
 
 # Jupyter Notebook files
-*.ipynb_checkpoints
+*.ipynb
+**/ipynb_checkpoints/
 
 # IDE and editor files
 .vscode/
